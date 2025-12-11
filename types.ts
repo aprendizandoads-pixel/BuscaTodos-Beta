@@ -31,8 +31,6 @@ export interface StyleConfig {
 export interface PaymentConfig {
   accessToken: string;
   publicKey: string;
-  clientId: string;
-  clientSecret: string;
 }
 
 export interface AppConfig {
