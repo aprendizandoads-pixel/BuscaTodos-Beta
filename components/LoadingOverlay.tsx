@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ShieldCheck, Database, Server, Lock, Search, Car, Building } from 'lucide-react';
+import { ShieldCheck, Database, Server, Lock, Search, Car, Building, Smartphone } from 'lucide-react';
 import { SearchType } from '../types';
 
 interface LoadingOverlayProps {
@@ -27,13 +27,20 @@ const getSteps = (type: SearchType) => {
       { message: "Verificando Dívida Ativa...", icon: Database },
       { message: "Analisando saúde financeira...", icon: ShieldCheck },
     ];
-  } else {
-    // PLACA
+  } else if (type === 'PLACA') {
     return [
       ...baseSteps,
       { message: "Acessando base do DETRAN/DENATRAN...", icon: Car },
       { message: "Verificando multas e restrições...", icon: Database },
       { message: "Consultando histórico de roubo/furto...", icon: ShieldCheck },
+    ];
+  } else {
+    // PHONE
+    return [
+       ...baseSteps,
+       { message: "Localizando operadora de telefonia...", icon: Smartphone },
+       { message: "Verificando titularidade da linha...", icon: Database },
+       { message: "Buscando endereços vinculados...", icon: Search },
     ];
   }
 };

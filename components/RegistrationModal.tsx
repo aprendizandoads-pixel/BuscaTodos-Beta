@@ -1,17 +1,26 @@
+
 import React, { useState, useEffect } from 'react';
-import { X, Mail, Phone, User, Fingerprint, Lock, ArrowRight, Copy, CheckCircle, Loader2 } from 'lucide-react';
+import { X, Mail, Phone, User, Fingerprint, Lock, Copy, CheckCircle, Loader2, AlertTriangle, ExternalLink, QrCode, CreditCard, ChevronLeft, Shield, Star, HelpCircle, Clock, ShieldCheck, Check } from 'lucide-react';
 import { maskCPF, maskPhone } from '../utils/masks';
-import { AppConfig, PaymentData } from '../types';
-import { createPixPayment, checkPaymentStatus } from '../services/mercadopago';
+import { AppConfig, PaymentData, SearchType } from '../types';
+import { createPixPayment, createPreference, checkPaymentStatus } from '../services/mercadopago';
+import { createEfiPix } from '../services/efipay';
+import { initiateSocialLogin } from '../services/socialAuth';
 
 interface RegistrationModalProps {
   plan: 'basic' | 'complete';
+  searchType: SearchType;
   onClose: () => void;
   onSubmit: (data: any) => void;
   onSuccess: (orderData: any) => void;
   onPaymentUpdate: (paymentId: string, status: 'approved' | 'rejected') => void;
   config: AppConfig;
   initialCpf?: string;
+  initialData?: {
+      name?: string;
+      email?: string;
+      phone?: string;
+  };
 }
 
 const GoogleIcon = () => (
@@ -35,326 +44,496 @@ const FacebookIcon = () => (
    </svg>
 );
 
-export const RegistrationModal: React.FC<RegistrationModalProps> = ({ plan, onClose, onSubmit, config, onSuccess, onPaymentUpdate, initialCpf }) => {
-  const [step, setStep] = useState<'form' | 'payment' | 'success'>('form');
-  const [isGeneratingPix, setIsGeneratingPix] = useState(false);
-  const [paymentData, setPaymentData] = useState<PaymentData | null>(null);
-  const [copied, setCopied] = useState(false);
+// Componente de Timer Regressivo
+const PaymentTimer = () => {
+  const [timeLeft, setTimeLeft] = useState(30 * 60); // 30 minutos em segundos
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 text-orange-600 dark:text-orange-400 font-mono font-bold text-sm bg-orange-50 dark:bg-orange-900/20 px-3 py-1.5 rounded-lg border border-orange-100 dark:border-orange-900/50">
+      <Clock size={14} className="animate-pulse" />
+      <span>Expira em {formatTime(timeLeft)}</span>
+    </div>
+  );
+};
+
+export const RegistrationModal: React.FC<RegistrationModalProps> = ({ plan, searchType, onClose, onSuccess, onPaymentUpdate, config, initialCpf, initialData }) => {
+  // Determine correct plans
+  let activePlans;
+  switch (searchType) {
+      case 'CNPJ': activePlans = config.plans.cnpj; break;
+      case 'PLACA': activePlans = config.plans.plate; break;
+      case 'PHONE': activePlans = config.plans.phone; break;
+      default: activePlans = config.plans.cpf; break;
+  }
+  const selectedPlanDetails = plan === 'basic' ? activePlans.basic : activePlans.complete;
+  
+  const [step, setStep] = useState<'form' | 'payment'>('form');
   const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    phone: '',
-    cpf: initialCpf || ''
+    name: initialData?.name || '',
+    cpf: initialCpf || '',
+    phone: initialData?.phone || '',
+    email: initialData?.email || '',
+    confirmEmail: initialData?.email || ''
   });
 
-  const { plans, social, payment } = config;
-  const currentPrice = plan === 'basic' ? plans.basic.price : plans.complete.price;
-  const priceDisplay = `R$ ${currentPrice.toFixed(2).replace('.', ',')}`;
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentData, setPaymentData] = useState<PaymentData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [effectiveGateway, setEffectiveGateway] = useState<'mercadopago' | 'efi' | null>(null);
+  const [copied, setCopied] = useState(false);
 
-  const handleCpfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({ ...formData, cpf: maskCPF(e.target.value) });
-  };
+  // Determine which gateway to use
+  useEffect(() => {
+     if (config.payment.mercadopagoEnabled && !config.payment.efiEnabled) {
+         setEffectiveGateway('mercadopago');
+     } else if (!config.payment.mercadopagoEnabled && config.payment.efiEnabled) {
+         setEffectiveGateway('efi');
+     } else if (config.payment.mercadopagoEnabled && config.payment.efiEnabled) {
+         setEffectiveGateway(config.payment.activeGateway);
+     } else {
+         setEffectiveGateway(null);
+     }
+  }, [config.payment]);
 
   const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData({ ...formData, phone: maskPhone(e.target.value) });
   };
+  
+  const handleCpfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFormData({ ...formData, cpf: maskCPF(e.target.value) });
+  };
 
-  const handleFormSubmit = async (e: React.FormEvent) => {
+  const handleCreatePayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsGeneratingPix(true);
-    
-    // Call Service to generate PIX
-    const result = await createPixPayment({
-      customerName: formData.name,
-      customerCpf: formData.cpf,
-      plan: plan,
-      amount: currentPrice
-    }, formData.email, payment.accessToken);
+    if (!effectiveGateway) {
+        setError("Nenhum método de pagamento ativo no momento.");
+        return;
+    }
 
-    if (result) {
-      setPaymentData(result);
-      setStep('payment');
-      
-      // Notify App to create Order Record
-      onSuccess({
+    setPaymentLoading(true);
+    setError(null);
+
+    // Fallback price to 0 if missing
+    const price = selectedPlanDetails.price || 0;
+
+    const orderPayload = {
         customerName: formData.name,
         customerCpf: formData.cpf,
+        email: formData.email,
         plan: plan,
-        amount: currentPrice,
-        paymentId: result.id,
-        status: 'pending'
+        amount: price,
+        searchType: searchType
+    };
+
+    let isRedirecting = false;
+
+    try {
+      let result;
+      
+      if (effectiveGateway === 'mercadopago') {
+          if (config.payment.mode === 'pro') {
+             result = await createPreference(orderPayload, formData.email, config.payment);
+          } else {
+             result = await createPixPayment(orderPayload, formData.email, config.payment);
+          }
+      } else {
+          result = await createEfiPix(orderPayload, config.efi, config.payment);
+      }
+
+      setPaymentData(result);
+      
+      onSuccess({
+          customerName: formData.name,
+          customerCpf: formData.cpf,
+          email: formData.email,
+          plan: plan,
+          amount: price,
+          status: 'pending',
+          paymentId: result.id
       });
-    }
-    setIsGeneratingPix(false);
-  };
+      
+      // Auto-redirect logic for Checkout Pro
+      if (effectiveGateway === 'mercadopago' && config.payment.mode === 'pro') {
+          const redirectUrl = config.payment.activeGateway === 'mercadopago' && config.payment.sandbox 
+              ? result.sandbox_init_point 
+              : result.init_point;
+          
+          if (redirectUrl) {
+              isRedirecting = true;
+              window.location.href = redirectUrl;
+              return; // Stop execution to keep loading state while browser navigates
+          }
+      }
 
-  // Poll for payment status
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (step === 'payment' && paymentData?.id) {
-      interval = setInterval(async () => {
-        const status = await checkPaymentStatus(paymentData.id, payment.accessToken);
-        if (status === 'approved') {
-           setStep('success');
-           onPaymentUpdate(paymentData.id, 'approved');
-           clearInterval(interval);
-        }
-      }, 5000); // Check every 5 seconds
-    }
-    return () => clearInterval(interval);
-  }, [step, paymentData, payment.accessToken, onPaymentUpdate]);
-
-  const copyToClipboard = () => {
-    if (paymentData?.qr_code) {
-      navigator.clipboard.writeText(paymentData.qr_code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setStep('payment');
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Erro ao gerar pagamento. Tente novamente.");
+    } finally {
+      // Only stop loading if we are NOT redirecting (to prevent UI flash)
+      if (!isRedirecting) {
+          setPaymentLoading(false);
+      }
     }
   };
 
-  // Render Step 1: Form
-  const renderForm = () => {
-    const hasSocial = social.googleEnabled || social.facebookEnabled || social.appleEnabled;
-    
-    return (
-      <>
-        {/* Social Login */}
-        {hasSocial && (
-             <div className="space-y-3 mb-6">
-               {social.googleEnabled && (
-                 <button type="button" className="w-full flex items-center justify-center gap-3 py-3 px-4 border border-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-50 transition-colors bg-white shadow-sm relative overflow-hidden group">
-                   <GoogleIcon />
-                   <span className="relative z-10">Continuar com Google</span>
-                 </button>
-               )}
-               
-               {social.facebookEnabled && (
-                 <button type="button" className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-[#1877F2] text-white rounded-xl font-bold hover:bg-[#166fe5] transition-colors shadow-sm shadow-blue-500/30">
-                   <FacebookIcon />
-                   <span>Continuar com Facebook</span>
-                 </button>
-               )}
-
-               {social.appleEnabled && (
-                 <button type="button" className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition-colors shadow-sm">
-                   <AppleIcon />
-                   <span>Continuar com Apple</span>
-                 </button>
-               )}
-             </div>
-           )}
-
-           {hasSocial && (
-             <div className="relative flex py-2 items-center mb-6">
-              <div className="flex-grow border-t border-gray-200"></div>
-              <span className="flex-shrink mx-4 text-gray-400 text-xs uppercase font-bold tracking-wider">Ou preencha</span>
-              <div className="flex-grow border-t border-gray-200"></div>
-             </div>
-           )}
-
-           <form onSubmit={handleFormSubmit} className="space-y-4">
-             <div className="space-y-1">
-               <label className="text-xs font-bold text-gray-600 uppercase ml-1">Nome Completo</label>
-               <div className="relative">
-                 <User className="absolute left-4 top-3.5 text-gray-400" size={20} />
-                 <input 
-                   type="text" 
-                   placeholder="Digite seu nome"
-                   className="w-full pl-12 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 focus:bg-white outline-none transition-all font-medium text-gray-800"
-                   required
-                   value={formData.name}
-                   onChange={e => setFormData({...formData, name: e.target.value})}
-                 />
-               </div>
-             </div>
-             
-             <div className="space-y-1">
-               <label className="text-xs font-bold text-gray-600 uppercase ml-1">WhatsApp / Telefone</label>
-               <div className="relative">
-                 <Phone className="absolute left-4 top-3.5 text-gray-400" size={20} />
-                 <input 
-                   type="tel" 
-                   placeholder="(00) 00000-0000"
-                   className="w-full pl-12 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 focus:bg-white outline-none transition-all font-medium text-gray-800"
-                   required
-                   value={formData.phone}
-                   onChange={handlePhoneChange}
-                 />
-               </div>
-             </div>
-
-             <div className="space-y-1">
-               <label className="text-xs font-bold text-gray-600 uppercase ml-1">E-mail</label>
-               <div className="relative">
-                 <Mail className="absolute left-4 top-3.5 text-gray-400" size={20} />
-                 <input 
-                   type="email" 
-                   placeholder="seu@email.com"
-                   className="w-full pl-12 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 focus:bg-white outline-none transition-all font-medium text-gray-800"
-                   required
-                   value={formData.email}
-                   onChange={e => setFormData({...formData, email: e.target.value})}
-                 />
-               </div>
-             </div>
-
-             <div className="space-y-1">
-               <label className="text-xs font-bold text-gray-600 uppercase ml-1">CPF</label>
-               <div className="relative">
-                 <Fingerprint className="absolute left-4 top-3.5 text-gray-400" size={20} />
-                 <input 
-                   type="text" 
-                   placeholder="000.000.000-00"
-                   className={`w-full pl-12 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 focus:bg-white outline-none transition-all font-medium text-gray-800 ${initialCpf ? 'bg-gray-100 cursor-not-allowed' : ''}`}
-                   required
-                   value={formData.cpf}
-                   onChange={handleCpfChange}
-                   maxLength={14}
-                   readOnly={!!initialCpf}
-                 />
-                 {initialCpf && <Lock size={16} className="absolute right-4 top-4 text-gray-400" />}
-               </div>
-             </div>
-
-             <button 
-               type="submit" 
-               disabled={isGeneratingPix}
-               className="w-full bg-brand-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-brand-500/30 hover:bg-brand-700 transition-all active:scale-[0.98] mt-6 flex justify-between items-center px-6 group disabled:opacity-70 disabled:cursor-wait"
-               style={{ backgroundColor: config.style.primaryColor }}
-             >
-               {isGeneratingPix ? (
-                  <span className="flex items-center gap-2 mx-auto">
-                    <Loader2 className="animate-spin" /> Gerando PIX...
-                  </span>
-               ) : (
-                 <>
-                   <span className="group-hover:translate-x-1 transition-transform flex items-center gap-2">
-                     Ir para Pagamento <ArrowRight size={18} />
-                   </span>
-                   <span className="bg-white/20 px-2 py-1 rounded text-sm font-semibold">
-                     {priceDisplay}
-                   </span>
-                 </>
-               )}
-             </button>
-
-             <div className="flex items-center justify-center gap-2 mt-4 text-xs text-gray-400">
-               <Lock size={12} />
-               <p>Seus dados estão protegidos e seguros.</p>
-             </div>
-           </form>
-      </>
-    );
+  const handleSocialClick = async (provider: 'google' | 'facebook' | 'apple') => {
+       try {
+           const user = await initiateSocialLogin(provider, config.social);
+           setFormData(prev => ({
+               ...prev,
+               name: user.name,
+               email: user.email,
+               confirmEmail: user.email
+           }));
+       } catch (e: any) {
+           setError(e.message);
+       }
   };
 
-  // Render Step 2: Payment
   const renderPayment = () => {
+    if (!paymentData) return null;
+
+    // Checkout Pro (Redirect) - Fallback screen
+    if (effectiveGateway === 'mercadopago' && config.payment.mode === 'pro') {
+        return (
+            <div className="text-center p-6 space-y-6 flex flex-col items-center justify-center h-full animate-fade-in">
+                <div className="bg-blue-50 dark:bg-blue-900/20 p-6 rounded-full inline-block mb-2">
+                    <ExternalLink size={64} className="text-blue-500" />
+                </div>
+                <div>
+                    <h3 className="text-2xl font-bold text-gray-800 dark:text-gray-100">Finalizar no Mercado Pago</h3>
+                    <p className="text-base text-gray-500 dark:text-gray-400 mt-2 max-w-xs mx-auto">
+                        Se você não foi redirecionado automaticamente, clique no botão abaixo.
+                    </p>
+                </div>
+                <a 
+                  href={config.payment.activeGateway === 'mercadopago' && config.payment.mode === 'pro' && config.payment.sandbox ? paymentData.sandbox_init_point : paymentData.init_point}
+                  target="_self"
+                  className="block w-full max-w-sm bg-[#009EE3] text-white font-bold py-4 rounded-xl shadow-lg hover:brightness-110 transition-all text-lg"
+                >
+                    Pagar no Mercado Pago
+                </a>
+                <button onClick={() => setStep('form')} className="text-gray-400 text-sm hover:text-gray-600 underline">
+                    Voltar e corrigir dados
+                </button>
+            </div>
+        );
+    }
+
+    // PIX Transparente UI (Fixed Layout)
+    const qrCodeImage = paymentData.qr_code_base64 
+        ? `data:image/png;base64,${paymentData.qr_code_base64}`
+        : `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(paymentData.qr_code || '')}`; // Fallback visual seguro
+
     return (
-      <div className="flex flex-col items-center pt-2 animate-fade-in">
-        <div className="bg-green-50 text-green-700 px-4 py-2 rounded-lg text-sm font-medium mb-6 flex items-center gap-2">
-          <CheckCircle size={16} />
-          Cadastro recebido! Pague para liberar.
-        </div>
-        
-        <p className="text-sm text-gray-500 mb-2">Escaneie o QR Code abaixo:</p>
-        <div className="bg-white p-2 rounded-xl border-2 border-gray-100 shadow-inner mb-6">
-          {paymentData?.qr_code_base64 ? (
-             <img 
-               src={`data:image/png;base64,${paymentData.qr_code_base64}`} 
-               alt="PIX QR Code" 
-               className="w-48 h-48 object-contain"
-             />
-          ) : (
-            <div className="w-48 h-48 bg-gray-900 flex items-center justify-center text-white rounded-lg">
-               <span className="text-xs text-center px-2">QR Code Simulation<br/>(Use Copia e Cola)</span>
+      <div className="flex flex-col h-full animate-fade-in">
+         {/* Top Info */}
+         <div className="text-center px-4 pt-2 pb-4 shrink-0">
+            <div className="flex justify-between items-center mb-4">
+                <div className="flex flex-col items-start">
+                    <h3 className="text-lg font-bold text-gray-800 dark:text-gray-100">Pagamento via PIX</h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Liberação imediata</p>
+                </div>
+                <PaymentTimer />
             </div>
-          )}
-        </div>
 
-        <div className="w-full space-y-3">
-          <div className="relative">
-            <label className="text-xs font-bold text-gray-500 uppercase ml-1 mb-1 block">Pix Copia e Cola</label>
-            <div className="flex gap-2">
-              <input 
-                type="text" 
-                readOnly
-                value={paymentData?.qr_code || ''}
-                className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-600 font-mono truncate focus:outline-none"
-              />
-              <button 
-                onClick={copyToClipboard}
-                className={`p-2 rounded-lg border transition-all ${
-                  copied 
-                  ? 'bg-green-500 text-white border-green-500' 
-                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-                }`}
-              >
-                {copied ? <CheckCircle size={20} /> : <Copy size={20} />}
-              </button>
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-lg p-3 text-left flex gap-3 mb-2">
+                 <div className="bg-blue-100 dark:bg-blue-800 p-2 rounded-full h-fit">
+                    <ShieldCheck size={18} className="text-blue-600 dark:text-blue-300" />
+                 </div>
+                 <div>
+                     <p className="text-sm font-bold text-blue-900 dark:text-blue-200">Ambiente Seguro</p>
+                     <p className="text-xs text-blue-700 dark:text-blue-300 leading-tight">
+                        Seus dados estão criptografados. Escaneie o QR Code abaixo no app do seu banco.
+                     </p>
+                 </div>
             </div>
-          </div>
-        </div>
+         </div>
 
-        <div className="mt-8 text-center space-y-2">
-           <div className="flex items-center justify-center gap-2 text-brand-600 animate-pulse">
-             <Loader2 size={16} className="animate-spin" />
-             <span className="text-sm font-bold">Aguardando confirmação...</span>
-           </div>
-           <p className="text-xs text-gray-400 max-w-[200px] mx-auto">
-             A liberação ocorre automaticamente em alguns segundos após o pagamento.
-           </p>
-        </div>
+         {/* Scrollable Content */}
+         <div className="flex-1 overflow-y-auto px-4 custom-scrollbar pb-20">
+             <div className="flex flex-col items-center gap-6">
+                
+                {/* QR Code Card */}
+                <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-md relative group w-full max-w-[280px] aspect-square flex items-center justify-center">
+                    {paymentData.qr_code || paymentData.qr_code_base64 ? (
+                        <img 
+                            src={qrCodeImage}
+                            alt="QR Code PIX" 
+                            className="w-full h-full object-contain"
+                        />
+                    ) : (
+                        <div className="flex flex-col items-center justify-center text-gray-400">
+                            <QrCode size={48} className="mb-2 opacity-50" />
+                            <span className="text-xs text-center px-2">Gerando QR Code...</span>
+                        </div>
+                    )}
+                </div>
+
+                {/* Copia e Cola Section */}
+                <div className="w-full max-w-sm space-y-3">
+                    <div className="relative">
+                        <div className="absolute -top-2.5 left-3 bg-white dark:bg-slate-900 px-1 text-[10px] font-bold text-brand-600 dark:text-brand-400 uppercase tracking-wide">
+                            Pix Copia e Cola
+                        </div>
+                        <div className="bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 pt-4 flex items-center gap-2">
+                            <input 
+                                readOnly 
+                                value={paymentData.qr_code} 
+                                className="flex-1 bg-transparent text-xs text-gray-500 dark:text-gray-400 font-mono truncate outline-none select-all"
+                            />
+                        </div>
+                    </div>
+                    
+                    <button 
+                        onClick={() => {
+                            navigator.clipboard.writeText(paymentData.qr_code || '');
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 2000);
+                        }}
+                        className={`w-full py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-lg active:scale-[0.98] ${
+                            copied 
+                            ? 'bg-green-500 text-white shadow-green-500/30' 
+                            : 'bg-brand-600 text-white shadow-brand-500/30 hover:bg-brand-700'
+                        }`}
+                    >
+                        {copied ? <CheckCircle size={18} /> : <Copy size={18} />}
+                        {copied ? 'CÓDIGO COPIADO!' : 'COPIAR CÓDIGO PIX'}
+                    </button>
+                </div>
+                
+                {/* Status Indicator */}
+                <div className="flex items-center justify-center gap-2 text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/10 px-4 py-2 rounded-full animate-pulse">
+                    <Loader2 size={12} className="animate-spin" />
+                    Aguardando confirmação automática do banco...
+                </div>
+             </div>
+         </div>
+
+         {/* Footer Trust Badges - Fixed Bottom */}
+         <div className="absolute bottom-0 left-0 right-0 p-3 bg-gray-50 dark:bg-slate-800 border-t border-gray-100 dark:border-slate-700 flex justify-evenly items-center text-[10px] text-gray-400 dark:text-gray-500 z-10">
+              <div className="flex flex-col items-center gap-1">
+                  <Lock size={14} />
+                  <span>SSL Seguro</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                  <Shield size={14} />
+                  <span>Dados Protegidos</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                  <CheckCircle size={14} />
+                  <span>Verificado</span>
+              </div>
+         </div>
       </div>
     );
   };
 
-  // Render Step 3: Success
-  const renderSuccess = () => (
-    <div className="flex flex-col items-center justify-center py-10 animate-slide-up">
-      <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mb-6">
-        <CheckCircle size={48} className="text-green-500" />
-      </div>
-      <h3 className="text-2xl font-bold text-gray-800 mb-2">Pagamento Confirmado!</h3>
-      <p className="text-gray-500 text-center max-w-xs mb-8">
-        Seu relatório completo foi gerado e enviado para o seu e-mail: <strong>{formData.email}</strong>
-      </p>
-      <button 
-        onClick={onClose}
-        className="w-full bg-green-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-green-500/30 hover:bg-green-700 transition-all"
-      >
-        Acessar Área do Cliente
-      </button>
-    </div>
-  );
+  const hasSocial = config.social.googleEnabled || config.social.facebookEnabled || config.social.appleEnabled;
+
+  const currentPrice = selectedPlanDetails.price || 0;
+  const oldPrice = selectedPlanDetails.oldPrice || 0;
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-brand-900/80 backdrop-blur-sm animate-fade-in p-0 sm:p-6">
-      <div className="bg-white w-full max-w-md sm:rounded-3xl rounded-t-3xl overflow-hidden shadow-2xl animate-slide-up flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in p-0 sm:p-4 md:p-6" style={{ fontSize: `${config.style.fontScale}rem` }}>
+      <div 
+        className="bg-white dark:bg-slate-900 w-full h-full sm:h-auto sm:max-h-[95vh] sm:max-w-xl sm:rounded-3xl shadow-2xl animate-slide-up flex flex-col overflow-hidden transition-colors"
+        style={{ borderRadius: window.innerWidth >= 640 ? '1.5rem' : '0' }}
+      >
         
         {/* Header */}
-        <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800">
-              {step === 'form' ? 'Finalizar Acesso' : step === 'payment' ? 'Pagamento via PIX' : 'Tudo Pronto!'}
-            </h2>
-            <p className="text-sm text-gray-500">
-              {step === 'form' ? 'Crie sua conta para ver o relatório' : step === 'payment' ? 'Pague com segurança pelo Mercado Pago' : 'Obrigado por confiar em nossos serviços'}
-            </p>
-          </div>
-          <button 
-            onClick={onClose} 
-            className="p-2 bg-white rounded-full text-gray-500 hover:bg-gray-200 border border-gray-200 transition-colors"
-          >
-            <X size={20} />
-          </button>
+        <div className="px-5 py-3 bg-white dark:bg-slate-800 border-b border-gray-100 dark:border-slate-700 flex justify-between items-center shrink-0 z-20 relative shadow-sm">
+           {step === 'payment' && effectiveGateway !== 'mercadopago' && ( // Only show back button if not Redirecting or already in Pix
+               <button onClick={() => setStep('form')} className="p-2 -ml-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors">
+                   <ChevronLeft size={24} />
+               </button>
+           )}
+           <div>
+               <h2 className="text-base font-bold text-gray-800 dark:text-gray-100">{step === 'form' ? 'Checkout Expresso' : 'Pagamento Seguro'}</h2>
+           </div>
+           <button onClick={onClose} className="p-2 -mr-2 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors">
+             <X size={24} />
+           </button>
         </div>
 
-        <div className="p-6 overflow-y-auto custom-scrollbar">
-           {step === 'form' && renderForm()}
-           {step === 'payment' && renderPayment()}
-           {step === 'success' && renderSuccess()}
+        {/* Product Summary - Compact Top Bar (Hidden on Payment Step to save space if needed, currently kept for context) */}
+        {step === 'form' && (
+        <div className="px-5 py-3 bg-gray-50 dark:bg-slate-800/80 border-b border-gray-100 dark:border-slate-700 shrink-0">
+             <div className="bg-white dark:bg-slate-900 border border-brand-100 dark:border-slate-600 rounded-xl p-3 flex items-center justify-between shadow-sm">
+                 <div className="flex items-center gap-3">
+                     <div className="w-10 h-10 rounded-lg bg-brand-50 dark:bg-brand-900/30 flex items-center justify-center text-brand-600 dark:text-brand-400 shrink-0">
+                         {plan === 'complete' ? <Star size={20} fill="currentColor" /> : <Shield size={20} />}
+                     </div>
+                     <div>
+                         <p className="text-[10px] text-gray-500 dark:text-gray-400 font-bold uppercase tracking-wider">Produto</p>
+                         <p className="font-bold text-gray-800 dark:text-gray-100 text-sm leading-tight">{selectedPlanDetails.name}</p>
+                     </div>
+                 </div>
+                 <div className="text-right">
+                     <p className="text-[10px] text-gray-400 line-through">R$ {oldPrice.toFixed(2)}</p>
+                     <p className="text-lg font-bold text-brand-600 dark:text-brand-400">R$ {currentPrice.toFixed(2)}</p>
+                 </div>
+             </div>
         </div>
+        )}
+
+        {/* Main Content Area */}
+        <div className="flex-1 bg-white dark:bg-slate-900 flex flex-col overflow-hidden relative">
+            {step === 'form' ? (
+                <div className="flex-1 p-5 overflow-y-auto custom-scrollbar">
+                    {error && (
+                        <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-300 rounded-xl text-xs flex items-start gap-2">
+                            <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                            {error}
+                        </div>
+                    )}
+
+                    <form id="checkout-form" onSubmit={handleCreatePayment} className="space-y-3">
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase ml-1">Nome Completo</label>
+                            <div className="relative group">
+                                <User className="absolute left-3 top-3 text-gray-400 group-focus-within:text-brand-500 transition-colors" size={18} />
+                                <input 
+                                    type="text" 
+                                    required
+                                    placeholder="Nome no cartão/comprovante"
+                                    value={formData.name}
+                                    onChange={e => setFormData({...formData, name: e.target.value})}
+                                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm text-gray-900 dark:text-white focus:ring-1 focus:ring-brand-500 focus:bg-white dark:focus:bg-slate-700 outline-none transition-all placeholder-gray-400 dark:placeholder-gray-500"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase ml-1">CPF (Nota Fiscal)</label>
+                            <div className="relative group">
+                                <Fingerprint className="absolute left-3 top-3 text-gray-400 group-focus-within:text-brand-500 transition-colors" size={18} />
+                                <input 
+                                    type="tel" 
+                                    required
+                                    placeholder="000.000.000-00"
+                                    value={formData.cpf}
+                                    onChange={handleCpfChange}
+                                    maxLength={14}
+                                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm text-gray-900 dark:text-white focus:ring-1 focus:ring-brand-500 focus:bg-white dark:focus:bg-slate-700 outline-none transition-all placeholder-gray-400 dark:placeholder-gray-500 font-mono"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="space-y-1">
+                            <div className="flex items-center gap-1">
+                                <label className="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase ml-1">E-mail (Receber Relatório)</label>
+                                {/* Tooltip */}
+                                <div className="relative group inline-block">
+                                    <HelpCircle size={12} className="text-gray-400 cursor-help hover:text-brand-500" />
+                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-gray-900 dark:bg-black text-white text-[10px] rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 pointer-events-none text-center">
+                                        Este campo é opcional caso você utilize o Login Social abaixo.
+                                        <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-gray-900 dark:bg-black rotate-45"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div className="relative group">
+                                <Mail className="absolute left-3 top-3 text-gray-400 group-focus-within:text-brand-500 transition-colors" size={18} />
+                                <input 
+                                    type="email" 
+                                    placeholder="seu@email.com"
+                                    value={formData.email}
+                                    onChange={e => setFormData({...formData, email: e.target.value})}
+                                    className="w-full pl-12 pr-4 py-2.5 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm text-gray-900 dark:text-white focus:ring-1 focus:ring-brand-500 focus:bg-white dark:focus:bg-slate-700 outline-none transition-all placeholder-gray-400 dark:placeholder-gray-500"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase ml-1">WhatsApp (Opcional)</label>
+                            <div className="relative group w-full">
+                                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-brand-500 transition-colors pointer-events-none" size={18} />
+                                <input 
+                                    type="tel" 
+                                    placeholder="(00) 00000-0000"
+                                    value={formData.phone}
+                                    onChange={handlePhoneChange}
+                                    maxLength={15}
+                                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm text-gray-900 dark:text-white focus:ring-2 focus:ring-brand-500 focus:bg-white dark:focus:bg-slate-700 outline-none transition-all placeholder-gray-400 dark:placeholder-gray-500"
+                                />
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            ) : (
+                renderPayment()
+            )}
+
+            {/* Footer Actions (Only visible in Form Step) */}
+            {step === 'form' && (
+            <div className="p-5 border-t border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 shrink-0 z-20">
+                    <div className="w-full space-y-4">
+                        <button 
+                            form="checkout-form"
+                            type="submit" 
+                            disabled={paymentLoading}
+                            className={`w-full text-white font-bold py-4 rounded-2xl shadow-lg hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 text-lg relative overflow-hidden group ${paymentLoading ? 'opacity-80' : ''}`}
+                            style={{ 
+                                backgroundColor: config.style.primaryColor,
+                                boxShadow: `0 10px 20px -5px ${config.style.primaryColor}50`
+                            }}
+                        >
+                            {/* Shimmer Effect */}
+                            <div className="absolute inset-0 -translate-x-full group-hover:animate-[shimmer_1.5s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent z-10"></div>
+
+                            {paymentLoading ? <Loader2 className="animate-spin" /> : (
+                                config.payment.mode === 'pro' ? <ExternalLink size={20} /> : <QrCode size={20} />
+                            )}
+                            {paymentLoading ? 'Processando...' : (
+                                config.payment.mode === 'pro' 
+                                ? 'Pagar com Mercado Pago'
+                                : `Gerar PIX de R$ ${currentPrice.toFixed(2).replace('.', ',')}`
+                            )}
+                        </button>
+
+                        {/* Social Login Buttons - Simplified */}
+                        {hasSocial && (
+                            <div className="flex flex-col items-center gap-2 pt-1">
+                                <div className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Agilizar preenchimento com</div>
+                                <div className="flex gap-4">
+                                    {config.social.googleEnabled && (
+                                        <button type="button" onClick={() => handleSocialClick('google')} className="w-10 h-10 rounded-full bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 shadow-sm flex items-center justify-center hover:scale-105 transition-transform">
+                                            <GoogleIcon />
+                                        </button>
+                                    )}
+                                    {config.social.facebookEnabled && (
+                                        <button type="button" onClick={() => handleSocialClick('facebook')} className="w-10 h-10 rounded-full bg-[#1877F2] text-white shadow-sm flex items-center justify-center hover:scale-105 transition-transform">
+                                            <FacebookIcon />
+                                        </button>
+                                    )}
+                                    {config.social.appleEnabled && (
+                                        <button type="button" onClick={() => handleSocialClick('apple')} className="w-10 h-10 rounded-full bg-black dark:bg-white dark:text-black text-white shadow-sm flex items-center justify-center hover:scale-105 transition-transform">
+                                            <AppleIcon />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+            </div>
+            )}
+        </div>
+
       </div>
     </div>
   );

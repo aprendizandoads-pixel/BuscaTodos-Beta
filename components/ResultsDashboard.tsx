@@ -97,24 +97,24 @@ export const ResultsDashboard: React.FC<ResultsDashboardProps> = ({ userData, on
       <div className="px-4 -mt-8 relative z-20 space-y-4">
         
         {/* Gemini AI Advisor Card */}
-        <div className="bg-white rounded-2xl p-5 shadow-md border border-gray-100">
+        <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 shadow-md border border-gray-100 dark:border-slate-700 transition-colors">
           <div className="flex items-center gap-2 mb-3">
-             <div className="p-2 bg-purple-100 rounded-lg">
-                <Bot className="text-purple-600" size={20} />
+             <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-lg">
+                <Bot className="text-purple-600 dark:text-purple-400" size={20} />
              </div>
-             <h3 className="font-bold text-gray-800">Análise Inteligente</h3>
+             <h3 className="font-bold text-gray-800 dark:text-gray-200">Análise Inteligente</h3>
              {loadingAdvice && <RefreshCcw className="animate-spin text-gray-400 ml-auto" size={16} />}
           </div>
           
           {advice ? (
             <div className="space-y-3">
-              <h4 className="text-sm font-semibold text-purple-900">{advice.title}</h4>
-              <p className="text-sm text-gray-600 leading-relaxed">{advice.content}</p>
-              <div className="bg-purple-50 rounded-xl p-3 mt-2">
-                <p className="text-xs font-semibold text-purple-700 mb-2 uppercase tracking-wide">Plano de Ação</p>
+              <h4 className="text-sm font-semibold text-purple-900 dark:text-purple-300">{advice.title}</h4>
+              <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">{advice.content}</p>
+              <div className="bg-purple-50 dark:bg-purple-900/20 rounded-xl p-3 mt-2">
+                <p className="text-xs font-semibold text-purple-700 dark:text-purple-300 mb-2 uppercase tracking-wide">Plano de Ação</p>
                 <ul className="space-y-2">
                   {advice.actionItems.map((item, idx) => (
-                    <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
+                    <li key={idx} className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
                       <div className="mt-1 w-1.5 h-1.5 rounded-full bg-purple-400 shrink-0" />
                       {item}
                     </li>
@@ -123,40 +123,40 @@ export const ResultsDashboard: React.FC<ResultsDashboardProps> = ({ userData, on
               </div>
             </div>
           ) : (
-            <div className="h-24 bg-gray-100 animate-pulse rounded-lg"></div>
+            <div className="h-24 bg-gray-100 dark:bg-slate-700 animate-pulse rounded-lg"></div>
           )}
         </div>
 
         {/* Debts Summary */}
-        <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
+        <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-slate-700 transition-colors">
           <div className="flex justify-between items-center mb-4">
-            <h3 className="font-bold text-gray-800 flex items-center gap-2">
+            <h3 className="font-bold text-gray-800 dark:text-gray-200 flex items-center gap-2">
               <FileText className="text-brand-500" size={20} />
               Pendências
             </h3>
-            <span className="text-xs font-medium bg-red-100 text-red-600 px-2 py-1 rounded-md">
+            <span className="text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-2 py-1 rounded-md">
               {userData.debts.filter(d => d.status === 'Em Aberto').length} Ativas
             </span>
           </div>
           
           <div className="space-y-3">
             {userData.debts.map((debt) => (
-              <div key={debt.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-xl hover:bg-gray-100 transition-colors cursor-pointer border border-transparent hover:border-gray-200">
+              <div key={debt.id} className="flex justify-between items-center p-3 bg-gray-50 dark:bg-slate-900 rounded-xl hover:bg-gray-100 dark:hover:bg-slate-700 transition-colors cursor-pointer border border-transparent hover:border-gray-200 dark:hover:border-slate-600">
                 <div>
-                  <p className="font-semibold text-gray-800 text-sm">{debt.company}</p>
-                  <p className="text-xs text-gray-500">{debt.date}</p>
+                  <p className="font-semibold text-gray-800 dark:text-gray-200 text-sm">{debt.company}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{debt.date}</p>
                 </div>
                 <div className="text-right">
-                  <p className="font-bold text-gray-900">R$ {debt.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                  <p className="font-bold text-gray-900 dark:text-gray-100">R$ {debt.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                   <p className={`text-[10px] uppercase font-bold ${
-                    debt.status === 'Em Aberto' ? 'text-red-500' : 'text-green-500'
+                    debt.status === 'Em Aberto' ? 'text-red-500 dark:text-red-400' : 'text-green-500 dark:text-green-400'
                   }`}>{debt.status}</p>
                 </div>
               </div>
             ))}
           </div>
           
-          <button className="w-full mt-4 py-3 text-center text-sm font-semibold text-brand-600 hover:text-brand-700 hover:bg-brand-50 rounded-xl transition-colors">
+          <button className="w-full mt-4 py-3 text-center text-sm font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 hover:bg-brand-50 dark:hover:bg-brand-900/20 rounded-xl transition-colors">
             Ver relatório completo
           </button>
         </div>
@@ -177,15 +177,15 @@ export const ResultsDashboard: React.FC<ResultsDashboardProps> = ({ userData, on
 
         {/* Info Grid */}
         <div className="grid grid-cols-2 gap-4">
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col gap-2">
+          <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-slate-700 flex flex-col gap-2 transition-colors">
             <TrendingUp className="text-green-500" size={24} />
-            <span className="text-xs text-gray-500">Histórico</span>
-            <span className="font-bold text-gray-800 text-sm">Subiu 24 pts</span>
+            <span className="text-xs text-gray-500 dark:text-gray-400">Histórico</span>
+            <span className="font-bold text-gray-800 dark:text-gray-200 text-sm">Subiu 24 pts</span>
           </div>
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col gap-2">
+          <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-slate-700 flex flex-col gap-2 transition-colors">
              <ShieldCheck className="text-brand-500" size={24} />
-             <span className="text-xs text-gray-500">Dados</span>
-             <span className="font-bold text-gray-800 text-sm">Protegidos</span>
+             <span className="text-xs text-gray-500 dark:text-gray-400">Dados</span>
+             <span className="font-bold text-gray-800 dark:text-gray-200 text-sm">Protegidos</span>
           </div>
         </div>
       </div>
